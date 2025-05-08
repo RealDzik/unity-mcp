@@ -1416,11 +1416,34 @@ namespace UnityMcpBridge.Editor.Tools
             Component targetComponentInstance = null
         )
         {
-            Component targetComponent = targetComponentInstance ?? targetGo.GetComponent(compName);
+            Component targetComponent = targetComponentInstance;
+            if (targetComponent == null) // If not passed in (e.g., from AddComponentInternal)
+            {
+                if (compName.Equals("UnityEngine.Transform", StringComparison.OrdinalIgnoreCase) ||
+                    compName.Equals("Transform", StringComparison.OrdinalIgnoreCase))
+                {
+                    targetComponent = targetGo.transform;
+                }
+                else
+                {
+                    Type type = FindType(compName); // Attempt to resolve the type
+                    if (type != null && typeof(Component).IsAssignableFrom(type))
+                    {
+                        targetComponent = targetGo.GetComponent(type);
+                    }
+                    else
+                    {
+                        // Fallback to string-based GetComponent if FindType fails or it's not a component
+                        Debug.LogWarning($"[ManageGameObject.SetComponentPropertiesInternal] FindType failed for '{compName}' or it was not a Component type. Falling back to GetComponent(string). This might be less reliable.");
+                        targetComponent = targetGo.GetComponent(compName);
+                    }
+                }
+            }
+
             if (targetComponent == null)
             {
                 return Response.Error(
-                    $"Component '{compName}' not found on '{targetGo.name}' to set properties."
+                    $"Component '{compName}' not found on '{targetGo.name}' (or could not be resolved by name/type) to set properties."
                 );
             }
 
@@ -2059,21 +2082,35 @@ namespace UnityMcpBridge.Editor.Tools
             // If not found, search all loaded assemblies (slower)
             foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
             {
-                type = assembly.GetType(typeName);
-                if (type != null)
-                    return type;
-                // Also check with namespaces if simple name given
-                type = assembly.GetType("UnityEngine." + typeName);
-                if (type != null)
-                    return type;
-                type = assembly.GetType("UnityEditor." + typeName);
-                if (type != null)
-                    return type;
-                type = assembly.GetType("UnityEngine.UI." + typeName);
-                if (type != null)
-                    return type;
+                try
+                {
+                    type = assembly.GetType(typeName, false, true); // ignore case
+                    if (type != null)
+                        return type;
+                    
+                    // Also check with common Unity namespaces if simple name given and not yet found
+                    if (!typeName.Contains(".")) // Only if it's not already a fully qualified name
+                    {
+                        type = assembly.GetType("UnityEngine." + typeName, false, true);
+                        if (type != null) return type;
+                        type = assembly.GetType("UnityEditor." + typeName, false, true);
+                        if (type != null) return type;
+                        type = assembly.GetType("UnityEngine.UI." + typeName, false, true);
+                        if (type != null) return type;
+                    }
+                }
+                catch (System.IO.FileLoadException) { /* Ignore assemblies that cannot be loaded */ }
+                catch (System.BadImageFormatException) { /* Ignore assemblies with bad format */ }
+                catch (Exception ex) {
+                    // Log other potential exceptions during assembly scanning, but don't stop the process
+                    Debug.LogWarning($"[ManageGameObject.FindType] Exception while scanning assembly {assembly.FullName} for type '{typeName}': {ex.Message}");
+                }
             }
 
+            if (type == null) // If still not found after all attempts
+            {
+                Debug.LogWarning($"[ManageGameObject.FindType] Type '{typeName}' could not be resolved after checking common namespaces and all loaded assemblies. Please ensure the type name is correct and the assembly is loaded.");
+            }
             return null; // Not found
         }
 
